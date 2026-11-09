@@ -13,11 +13,15 @@ See README.md for setup, inputs, and output details.
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import math
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +72,8 @@ ZOOM_MAX = 40.0
 ZOOM_STEP = 1.1  # multiplier for one wheel notch or one +/- button press
 DRAG_THRESHOLD_PX = 4  # movement below this counts as a click, not a drag
 MARKER_RADIUS_PX = 7
+KEPT_MARKER_COLOR = "#1e9e3c"  # green
+REJECTED_MARKER_COLOR = "red"
 REFERENCE_MAX_FIT_SCALE = 1.0  # the reference is never enlarged to fill the view
 PREVIEW_MAX_FIT_SCALE = 3.0  # small GIF and grid previews may be enlarged to fit
 
@@ -917,6 +923,139 @@ def write_registration_diagnostics(
             )
 
 
+SESSION_FILE_NAME = "session.json"
+
+
+def read_spores_csv(output_dir: Path) -> list[tuple[str, int, int, int]]:
+    """Read (spore_id, x, y, crop_size) rows from spores.csv. Empty if there is no file."""
+    path = output_dir / "spores.csv"
+    if not path.is_file():
+        return []
+    with open(path, newline="", encoding="utf-8") as f:
+        return [
+            (
+                row["spore_id"],
+                int(row["reference_x"]),
+                int(row["reference_y"]),
+                int(row["crop_size"]),
+            )
+            for row in csv.DictReader(f)
+        ]
+
+
+def existing_spore_numbers(output_dir: Path | None) -> set[int]:
+    """Numbers of the spores already saved in the output folder (from spores.csv, the crop
+    folders, and the GIF and grid names). New spores take numbers above these, so an
+    earlier spore's files are never overwritten."""
+    if output_dir is None or not output_dir.is_dir():
+        return set()
+    names = set(list_saved_outputs(output_dir))
+    crops_dir = output_dir / "crops"
+    if crops_dir.is_dir():
+        names |= {p.name for p in crops_dir.iterdir() if p.is_dir()}
+    try:
+        names |= {row[0] for row in read_spores_csv(output_dir)}
+    except (OSError, ValueError, KeyError):
+        pass
+    numbers = set()
+    for name in names:
+        match = re.fullmatch(r"S(\d+)", name)
+        if match:
+            numbers.add(int(match.group(1)))
+    return numbers
+
+
+def folder_fingerprint(paths: list[Path]) -> list[dict]:
+    """Identify the input images by name and content hash. A saved selection is restored
+    only onto the same images it was made on."""
+    fingerprint = []
+    for path in paths:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        fingerprint.append({"name": path.name, "sha256": digest.hexdigest()})
+    return fingerprint
+
+
+def save_session(output_dir: Path, fingerprint: list[dict], rejected) -> None:
+    """Record the images the selection was made on, and the rejected candidates."""
+    data = {
+        "images": fingerprint,
+        "rejected": [[int(x), int(y), int(size)] for x, y, size in rejected],
+    }
+    with open(output_dir / SESSION_FILE_NAME, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_session(output_dir: Path) -> dict | None:
+    """Read session.json. Returns None if it is missing or unreadable."""
+    path = output_dir / SESSION_FILE_NAME
+    if not path.is_file():
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        rejected = [(int(x), int(y), int(size)) for x, y, size in data["rejected"]]
+        return {"images": data["images"], "rejected": rejected}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def restore_selection(
+    output_dir: Path, fingerprint: list[dict], aligned: list[np.ndarray]
+):
+    """Work out what an earlier session left in the output folder.
+
+    Returns (kept_spores, rejected, message). The kept spores are restored only when the
+    images match the ones they were saved from; their tracking is recomputed on the
+    registered frames. The message is empty when the folder has no earlier outputs.
+    """
+    numbers = existing_spore_numbers(output_dir)
+    if not numbers:
+        return [], [], ""
+    next_id = f"S{max(numbers) + 1:03d}"
+    session = load_session(output_dir)
+    if session is None:
+        return (
+            [],
+            [],
+            (
+                "Earlier outputs were found in this folder. They are kept, and new spores "
+                f"start at {next_id}."
+            ),
+        )
+    if session["images"] != fingerprint:
+        return (
+            [],
+            [],
+            (
+                "The earlier selection was not restored because the images have changed since "
+                f"it was saved. Earlier outputs are kept, and new spores start at {next_id}."
+            ),
+        )
+    try:
+        saved = read_spores_csv(output_dir)
+    except (OSError, ValueError, KeyError):
+        return (
+            [],
+            [],
+            (
+                "The earlier spores.csv could not be read, so no spores were restored. "
+                f"New spores start at {next_id}."
+            ),
+        )
+    spores = []
+    for spore_id, x, y, size in saved:
+        centers, scores = track_spore(aligned, x, y, size)
+        spores.append(Spore(spore_id, x, y, size, centers, scores))
+    message = (
+        f"Restored {len(spores)} kept spores and {len(session['rejected'])} rejected candidates "
+        f"from the earlier session. New spores start at {next_id}."
+    )
+    return spores, session["rejected"], message
+
+
 def save_spore_outputs(
     output_dir: Path,
     paths: list[Path],
@@ -931,11 +1070,17 @@ def save_spore_outputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     labels = [p.stem for p in paths]
 
+    # Merge with spores already listed, so earlier spores stay listed after a reopen.
+    rows = {
+        spore_id: (x, y, size) for spore_id, x, y, size in read_spores_csv(output_dir)
+    }
+    for spore in spores:
+        rows[spore.spore_id] = (spore.x, spore.y, spore.size)
     with open(output_dir / "spores.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["spore_id", "reference_x", "reference_y", "crop_size"])
-        for spore in spores:
-            writer.writerow([spore.spore_id, spore.x, spore.y, spore.size])
+        for spore_id in sorted(rows):
+            writer.writerow([spore_id, *rows[spore_id]])
 
     for spore in spores:
         crops = [
@@ -1292,10 +1437,16 @@ class OutputPreviewWindow(tk.Toplevel):
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        gif_tab = ttk.Frame(notebook)
         grid_tab = ttk.Frame(notebook)
+        gif_tab = ttk.Frame(notebook)
+        notebook.add(grid_tab, text="Grid JPG")  # first tab, shown on open
         notebook.add(gif_tab, text="Animated GIF")
-        notebook.add(grid_tab, text="Grid JPG")
+
+        grid_bar = ttk.Frame(grid_tab, padding=(0, 4))
+        grid_bar.pack(fill="x")
+        self.grid_view = ZoomView(grid_tab, max_fit_scale=PREVIEW_MAX_FIT_SCALE)
+        self.grid_view.pack(fill="both", expand=True)
+        ZoomControls(grid_bar, self.grid_view).pack(side="right")
 
         gif_bar = ttk.Frame(gif_tab, padding=(0, 4))
         gif_bar.pack(fill="x")
@@ -1308,12 +1459,6 @@ class OutputPreviewWindow(tk.Toplevel):
         self.gif_view = ZoomView(gif_tab, max_fit_scale=PREVIEW_MAX_FIT_SCALE)
         self.gif_view.pack(fill="both", expand=True)
         ZoomControls(gif_bar, self.gif_view).pack(side="right")
-
-        grid_bar = ttk.Frame(grid_tab, padding=(0, 4))
-        grid_bar.pack(fill="x")
-        self.grid_view = ZoomView(grid_tab, max_fit_scale=PREVIEW_MAX_FIT_SCALE)
-        self.grid_view.pack(fill="both", expand=True)
-        ZoomControls(grid_bar, self.grid_view).pack(side="right")
 
         self.refresh()
 
@@ -1451,6 +1596,9 @@ class SporeApp:
         ] = []  # (x, y, crop size) of rejected candidates
         self.output_dir: Path | None = None
         self.preview_window: OutputPreviewWindow | None = None
+        self._fingerprint: list[dict] = []  # identifies the loaded images on disk
+        self._busy = False  # a background task is running
+        self._busy_window: tk.Toplevel | None = None
 
         self.crop_size_var = tk.StringVar(value=str(DEFAULT_CROP_SIZE))
         self.status = tk.StringVar(
@@ -1467,7 +1615,7 @@ class SporeApp:
     def _build_toolbar(self):
         bar = ttk.Frame(self.root, padding=(8, 8, 8, 2))
         bar.pack(fill="x")
-        ttk.Button(bar, text="1. Load image folder", command=self.load_folder).pack(
+        ttk.Button(bar, text="Load image folder", command=self.load_folder).pack(
             side="left"
         )
         ttk.Button(
@@ -1504,7 +1652,7 @@ class SporeApp:
         footer.pack(fill="x")
         ttk.Label(
             footer,
-            text="Yellow = kept spore. Red = rejected; click there again to re-select it. "
+            text="Green = kept spore. Red = rejected; click there again to re-select it. "
             "Review each candidate through all timepoints, then keep or reject it.",
         ).pack(anchor="w")
         self.spore_list = tk.Listbox(footer, height=5)
@@ -1513,6 +1661,8 @@ class SporeApp:
     # -- loading and registration -------------------------------------------
 
     def load_folder(self):
+        if self._busy:
+            return
         folder = filedialog.askdirectory(title="Choose image folder")
         if not folder:
             return
@@ -1543,7 +1693,7 @@ class SporeApp:
             return
 
         self.paths, self.images = paths, images
-        self.aligned, self.registrations = [], []
+        self.aligned, self.registrations, self._fingerprint = [], [], []
         self.spores, self.rejected = [], []
         self.spore_list.delete(0, tk.END)
         self.output_dir = Path(folder) / OUTPUT_FOLDER_NAME
@@ -1554,60 +1704,144 @@ class SporeApp:
         self._reference_pil = frames_to_pil([images[0]])[0]
         self.view.set_image(self._reference_pil)
         self._refresh_markers()
-        self.root.update_idletasks()
+        if self.preview_window is not None:
+            self.preview_window.refresh()
         self.register()
 
-    def register(self) -> bool:
-        """Register all frames to the reference. Runs automatically after loading.
-
-        Returns True on success.
-        """
+    def register(self, then=None) -> None:
+        """Register all frames to the reference in the background, then restore any earlier
+        selection saved in the output folder. Calls then() on success, if given."""
         if not self.images:
             messagebox.showinfo("Load images", "Load an image folder first.")
-            return False
-        self.status.set("Registering images to the first timepoint...")
-        self.root.update_idletasks()
-        try:
-            aligned, registrations = register_images(self.images)
-        except RegistrationError as exc:
-            messagebox.showerror("Registration failed", str(exc))
-            self.status.set("Registration failed. Original images remain loaded.")
-            return False
-
-        self.aligned, self.registrations = aligned, registrations
-        summary = "; ".join(
-            f"{p.name}: {r.method}"
-            + ("" if r.inliers is None else f" ({r.inliers}/{r.matches} inliers)")
-            for p, r in zip(self.paths[1:], registrations[1:])
-        )
-        self.status.set(
-            "Registration complete. Review alignment before selecting spores. "
-            + summary
-        )
-        if messagebox.askyesno(
-            "Registration diagnostics",
-            "Create registration diagnostics in the output folder? "
-            "This saves per-frame overlays and transformation parameters.",
-        ):
-            self.save_diagnostics()
-        return True
-
-    def save_diagnostics(self):
-        diag_dir = self.output_dir / "registration"
-        try:
-            write_registration_diagnostics(
-                diag_dir, self.paths, self.aligned, self.registrations
-            )
-        except OSError as exc:
-            messagebox.showerror("Diagnostics failed", str(exc))
             return
-        messagebox.showinfo("Diagnostics saved", f"Saved to:\n{diag_dir}")
+        if self._busy:
+            return
+        images, paths, output_dir = self.images, self.paths, self.output_dir
+
+        def work():
+            aligned, registrations = register_images(images)
+            fingerprint = folder_fingerprint(paths)
+            restored = restore_selection(output_dir, fingerprint, aligned)
+            return aligned, registrations, fingerprint, restored
+
+        def done(result):
+            (
+                aligned,
+                registrations,
+                fingerprint,
+                (spores, rejected, restore_message),
+            ) = result
+            self.aligned, self.registrations, self._fingerprint = (
+                aligned,
+                registrations,
+                fingerprint,
+            )
+            self.spores, self.rejected = [], list(rejected)
+            self.spore_list.delete(0, tk.END)
+            for spore in spores:
+                self._add_kept(spore)
+            self._refresh_markers()
+            summary = "; ".join(
+                f"{p.name}: {r.method}"
+                + ("" if r.inliers is None else f" ({r.inliers}/{r.matches} inliers)")
+                for p, r in zip(paths[1:], registrations[1:])
+            )
+            self.status.set(
+                "Registration complete. Review alignment before selecting spores. "
+                + summary
+                + (f" {restore_message}" if restore_message else "")
+            )
+            if then is not None:
+                then()
+
+        def failed(exc):
+            if isinstance(exc, RegistrationError):
+                messagebox.showerror("Registration failed", str(exc))
+            else:
+                messagebox.showerror("Registration error", str(exc))
+            self.status.set("Registration failed. Original images remain loaded.")
+
+        self._run_in_background(
+            "Registering images to the first timepoint.\nThis can take a little while.",
+            work,
+            done,
+            failed,
+        )
+
+    def _run_in_background(self, message, work, on_done, on_error):
+        """Run work() in a thread while a 'please wait' window is shown. Only the main thread
+        touches Tk: the result is passed back through a queue and handled by polling."""
+        self._busy = True
+        self._show_busy(message)
+        results: queue.Queue = queue.Queue()
+
+        def runner():
+            try:
+                results.put((True, work()))
+            except Exception as exc:  # reported to the user on the main thread
+                results.put((False, exc))
+
+        threading.Thread(target=runner, daemon=True).start()
+        self.root.after(100, lambda: self._poll_background(results, on_done, on_error))
+
+    def _poll_background(self, results, on_done, on_error):
+        try:
+            ok, payload = results.get_nowait()
+        except queue.Empty:
+            self.root.after(
+                100, lambda: self._poll_background(results, on_done, on_error)
+            )
+            return
+        self._busy = False
+        self._hide_busy()
+        if ok:
+            on_done(payload)
+        else:
+            on_error(payload)
+
+    def _show_busy(self, message):
+        win = tk.Toplevel(self.root)
+        win.title("Please wait")
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)  # cannot be closed while working
+        ttk.Label(win, text=message, padding=(20, 16, 20, 8), justify="center").pack()
+        bar = ttk.Progressbar(win, mode="indeterminate", length=260)
+        bar.pack(padx=20, pady=(0, 18))
+        bar.start(12)
+        self._busy_window = win
+        self.root.config(cursor="watch")
+        try:
+            win.grab_set()  # ignore clicks on the main window until the task finishes
+        except tk.TclError:
+            pass  # some window managers refuse a grab before the window is mapped
+
+    def _hide_busy(self):
+        if self._busy_window is not None:
+            self._busy_window.grab_release()
+            self._busy_window.destroy()
+            self._busy_window = None
+        self.root.config(cursor="")
+
+    def _spore_line(self, spore: Spore) -> str:
+        return f"{spore.spore_id}: x={spore.x}, y={spore.y}, size={spore.size}"
+
+    def _add_kept(self, spore: Spore) -> None:
+        self.spores.append(spore)
+        self.spore_list.insert(tk.END, self._spore_line(spore))
+
+    def _new_spore_id(self) -> str:
+        """Next free ID. Numbers already on disk count too, so earlier files are not overwritten."""
+        used = existing_spore_numbers(self.output_dir) | {
+            int(s.spore_id[1:]) for s in self.spores
+        }
+        return f"S{max(used, default=0) + 1:03d}"
 
     # -- spore selection ----------------------------------------------------
 
     def _refresh_markers(self):
-        markers = [(s.x, s.y, "yellow", s.spore_id) for s in self.spores]
-        markers += [(x, y, "red", "") for x, y, _size in self.rejected]
+        markers = [(s.x, s.y, KEPT_MARKER_COLOR, s.spore_id) for s in self.spores]
+        markers += [(x, y, REJECTED_MARKER_COLOR, "") for x, y, _size in self.rejected]
         self.view.set_markers(markers)
 
     def _read_crop_size(self) -> int | None:
@@ -1632,9 +1866,10 @@ class SporeApp:
         ]
 
     def on_view_click(self, x: int, y: int):
-        if not self.images:
+        if not self.images or self._busy:
             return
-        if not self.aligned and not self.register():
+        if not self.aligned:
+            self.register(then=lambda: self.on_view_click(x, y))
             return
         size = self._read_crop_size()
         if size is None:
@@ -1674,12 +1909,8 @@ class SporeApp:
             # The candidate carries its own crop size, so changing the size box later
             # cannot make the saved spore differ from the crops that were reviewed.
             self._forget_rejections_near(candidate.x, candidate.y, candidate.size)
-            candidate.spore_id = f"S{len(self.spores) + 1:03d}"
-            self.spores.append(candidate)
-            self.spore_list.insert(
-                tk.END,
-                f"{candidate.spore_id}: x={candidate.x}, y={candidate.y}, size={candidate.size}",
-            )
+            candidate.spore_id = self._new_spore_id()
+            self._add_kept(candidate)
             self._refresh_markers()
             self.status.set(
                 f"Selected {len(self.spores)} spores. Click another spore or save."
@@ -1713,22 +1944,35 @@ class SporeApp:
         if not self.aligned:
             messagebox.showerror("Not registered", "Register the images before saving.")
             return
-        try:
-            save_spore_outputs(self.output_dir, self.paths, self.aligned, self.spores)
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Save failed", str(exc))
-            return
+        paths, aligned, registrations = self.paths, self.aligned, self.registrations
+        spores, rejected = list(self.spores), list(self.rejected)
+        output_dir, fingerprint = self.output_dir, self._fingerprint
 
-        messagebox.showinfo(
-            "Extraction complete",
-            f"Saved {len(self.spores)} spore sequences (TIFF crops, GIFs, grid JPGs, "
-            f"coordinates) to:\n{self.output_dir}",
+        def work():
+            save_spore_outputs(output_dir, paths, aligned, spores)
+            write_registration_diagnostics(
+                output_dir / "registration", paths, aligned, registrations
+            )
+            save_session(output_dir, fingerprint, rejected)
+
+        def done(_):
+            self.status.set(
+                f"Saved {len(spores)} spore sequences to {output_dir}. "
+                "Registration diagnostics are in registration/."
+            )
+            if self.preview_window is not None:
+                self.preview_window.refresh()
+
+        def failed(exc):
+            messagebox.showerror("Save failed", str(exc))
+            self.status.set("Save failed. See the error message.")
+
+        self._run_in_background(
+            "Saving spores, GIFs and grids.\nThis can take a little while.",
+            work,
+            done,
+            failed,
         )
-        self.status.set(
-            f"Saved {len(self.spores)} spore sequences to {self.output_dir}"
-        )
-        if self.preview_window is not None:
-            self.preview_window.refresh()
 
     def open_preview(self):
         if self.preview_window is not None:

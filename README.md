@@ -39,9 +39,9 @@ Put the images for one experiment in a single folder, with one image per timepoi
 ## Workflow
 
 1. **Load image folder.** Choose the folder. The first image appears in the window, and the
-   frames are registered to it automatically. A status message reports the result.
-   You are then offered registration diagnostics, which are recommended for checking
-   alignment.
+   frames are registered to it automatically. A "Please wait" window shows while this runs,
+   and the status line reports the result. If the folder has outputs from an earlier session,
+   they are picked up as described in *Reopening a folder*.
 2. **Zoom in on the spore if needed** (see *Viewing and zooming* below), so the click lands
    on the centre you want.
 3. **Click a spore's centre** on the reference image. A candidate window shows the spore
@@ -52,12 +52,14 @@ Put the images for one experiment in a single folder, with one image per timepoi
    - Click **Keep spore** to add it, or **Reject** to discard it. Closing the window also
      counts as rejecting.
 4. **Markers on the reference:**
-   - **Yellow** circles with IDs (S001, S002, ...) are kept spores.
+   - **Green** circles with IDs (S001, S002, ...) are kept spores.
    - **Red** circles are rejected candidates. They do not block the area. Click there again
      to review it another time. If you then keep it, the red circle is removed. If you
      reject it again, it is replaced by a new red circle.
 5. Repeat steps 2 to 4 for each spore.
-6. **Save selected spores + outputs.** Writes all files for every kept spore.
+6. **Save selected spores + outputs.** Writes all files for every kept spore, along with
+   the registration diagnostics and the session record. A "Please wait" window shows while
+   it works. Saving does not ask for confirmation.
 7. **Preview outputs** (optional) and **Delete GIFs + grids** (optional). See below.
 
 ### Viewing and zooming
@@ -83,7 +85,7 @@ output folder. Choose a spore from the drop-down list.
 - **Animated GIF** tab: plays the saved GIF. **Pause** and **Play** control the animation.
   The frame counter shows which timepoint is on screen. The GIF uses the same zoom controls
   as the main window.
-- **Grid JPG** tab: shows the saved grid, with zoom.
+- **Grid JPG** tab (shown first): shows the saved grid, with zoom.
 - **Delete this spore's GIF + grid** deletes that spore's GIF and grid after you confirm.
 - **Open output folder** opens the folder in your file browser.
 
@@ -94,6 +96,24 @@ Deletion does not remove TIFF crops, `spores.csv`, `crop_alignment.csv`, or regi
 diagnostics. Deleted files cannot be recovered. To recreate them, select the same spores
 again and save, or keep the spore selection and save again.
 
+## Reopening a folder
+
+If the input folder already contains a `spore_output` folder from an earlier session, the
+program checks it when you load the folder. Images are compared by a content hash, not by
+date.
+
+- **Same images.** The kept spores and rejected candidates from the last save are restored,
+  and their tracking is recomputed on the registered frames. The status line says how many
+  were restored.
+- **Changed images.** If any image differs from those the selection was made on, the
+  selection is not restored. Earlier outputs are kept untouched.
+- **Either way,** new spores are numbered after the highest number already in the output
+  folder, and `spores.csv` keeps the rows from earlier saves. Earlier files are never
+  overwritten by a new spore.
+
+There is no button to remove a single restored spore. To start over, move the `spore_output`
+folder out of the input folder and load the folder again. Deleting it removes the outputs.
+
 ## Outputs
 
 Everything is written to a `spore_output` folder inside the input folder:
@@ -101,6 +121,7 @@ Everything is written to a `spore_output` folder inside the input folder:
 ```
 spore_output/
 ├── spores.csv                 # one row per kept spore: ID, clicked x/y, crop size
+├── session.json               # image fingerprints and rejected candidates, for reopening
 ├── S001.gif                   # animated GIF, one frame per timepoint, labelled
 ├── S001_grid.jpg              # labelled grid for figures, 300 dpi tag
 ├── crops/
@@ -111,7 +132,7 @@ spore_output/
 ├── S002.gif
 ├── S002_grid.jpg
 ├── crops/S002/...
-└── registration/              # only if you chose diagnostics
+└── registration/              # written on every save
     ├── t02_overlay.png        # 50/50 blend of each aligned frame over the reference
     ├── ...
     └── transformations.csv    # per-frame method, match counts, and 2x3 affine matrix
@@ -238,10 +259,10 @@ Change these constants at the top of the script:
   each spore.
 - **Frame edges.** Registration can leave a black margin where the warped image did not
   cover the reference. Crops near the edge include zeros for the same reason.
-- **Overwriting.** Saving writes into `spore_output` and overwrites files with the same spore
-  IDs. Loading a new folder restarts IDs at S001, so use a separate input folder for each
-  experiment, or delete the old output folder first. Files from earlier runs are not removed
-  automatically, but the preview window lists them.
+- **Overwriting.** Saving rewrites the files of any spore whose ID is in the current
+  selection. New spore IDs continue after the highest number already in the output folder,
+  so earlier spores are not replaced. Files from earlier runs are never removed
+  automatically, and the preview window lists them.
 - **Deletion is permanent.** There is no undo for GIF and grid deletion.
 - **Figures.** The labels are part of the pixels in the GIF and grid. Check your journal's
   figure requirements, since many ask for TIFF or EPS rather than JPEG. The grid is saved as
