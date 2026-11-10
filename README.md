@@ -1,6 +1,6 @@
 # Spore Time-Series Extractor
 
-`spore_series.py` aligns a series of microscope images taken over time, lets you click
+The `spore_series` package aligns a series of microscope images taken over time, lets you click
 individual spores on the first image, follows each kept spore through the whole series, and
 saves the results as TIFF crops, an animated GIF, and a labelled grid JPG for figures. The
 window can also preview and delete the GIFs and grids it has saved.
@@ -16,6 +16,28 @@ window can also preview and delete the GIFs and grids it has saved.
 pip install opencv-python numpy pillow
 python spore_series.py
 ```
+
+## Code layout
+
+The program is a package, so each part can be read and changed on its own:
+
+| File | Contents |
+|---|---|
+| `spore_series.py` | Launcher. Run this to start the window. |
+| `spore_series/config.py` | All settings (the constants in the Settings table) |
+| `spore_series/models.py` | Data types: `Spore`, `FrameRegistration`, `RegistrationError` |
+| `spore_series/imaging.py` | Reading images, fitting frames to the reference size, brightness |
+| `spore_series/registration.py` | Aligning frames to the reference (SIFT, translation, spores) |
+| `spore_series/tracking.py` | Following each spore through the frames |
+| `spore_series/outputs.py` | TIFF crops, GIF, grid JPG, CSV rows, registration diagnostics |
+| `spore_series/session.py` | Recording and restoring an earlier selection (`session.json`) |
+| `spore_series/files.py` | Listing, reading and deleting files in `spore_output` |
+| `spore_series/zoom.py` | The zoomable image view and click mapping |
+| `spore_series/preview.py` | The output preview window |
+| `spore_series/app.py` | The main window |
+
+Keep the `spore_series` folder next to `spore_series.py`. Both must stay in the same
+folder for the launcher to find the package.
 
 ## Input
 
