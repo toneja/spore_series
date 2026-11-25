@@ -34,6 +34,8 @@ The program is a package, so each part can be read and changed on its own:
 | `spore_series/files.py` | Listing, reading and deleting files in `spore_output` |
 | `spore_series/zoom.py` | The zoomable image view and click mapping |
 | `spore_series/preview.py` | The output preview window |
+| `spore_series/calibration.py` | Reading the pixel size (µm per pixel) from image metadata |
+| `spore_series/scalebar.py` | Drawing scale bars on the GIF frames and grid panels |
 | `spore_series/app.py` | The main window |
 
 Keep the `spore_series` folder next to `spore_series.py`. Both must stay in the same
@@ -63,7 +65,9 @@ Put the images for one experiment in a single folder, with one image per timepoi
 1. **Load image folder.** Choose the folder. The first image appears in the window, and the
    frames are registered to it automatically. A "Please wait" window shows while this runs,
    and the status line reports the result. If the folder has outputs from an earlier session,
-   they are picked up as described in *Reopening a folder*.
+   they are picked up as described in *Reopening a folder*. The **Microns per pixel** box in the
+   toolbar is filled in from the image metadata when the images have a calibration. Type a value
+   there to set or change it (see *Scale bars*).
 2. **Zoom in on the spore if needed** (see *Viewing and zooming* below), so the click lands
    on the centre you want.
 3. **Click a spore's centre** on the reference image. A candidate window shows the spore
@@ -118,6 +122,37 @@ Deletion does not remove TIFF crops, `spores.csv`, `crop_alignment.csv`, or regi
 diagnostics. Deleted files cannot be recovered. To recreate them, select the same spores
 again and save, or keep the spore selection and save again.
 
+## Scale bars
+
+The GIF frames and the grid panels get a scale bar in the bottom-right corner. The TIFF
+crops are never changed.
+
+**Where the scale comes from.** When you load a folder, the first image's metadata is read:
+
+- TIFF resolution tags in inches or centimetres, ImageJ's `unit=micron` convention, and
+  OME-TIFF `PhysicalSizeX` values.
+- The DPI stored in PNG and JPEG files.
+
+Values of 72 or 96 dpi are ignored, because software writes those as defaults rather than as
+calibrations. Values outside 0.01 to 1000 µm per pixel are also ignored. If the first image has
+no usable calibration, the box stays empty.
+
+**Setting it yourself.** Type the size of one pixel in microns in the **Microns per pixel**
+box, for example `0.65`, and press Enter or **Set scale**. A typed value replaces the metadata
+value. It is saved in `session.json`, so reopening the folder restores it. Leave the box empty
+for no scale bars.
+
+**Changing it later.** Outputs already saved keep their old scale bars. Save again to redraw
+them. The status line reminds you after you change the value.
+
+**Bar length.** The bar is the longest round length (0.5, 1, 2, 5, 10, 20, 50 … µm) that is at
+most a quarter of the image width. In the grid, each panel is enlarged from its crop, and the
+bar is drawn at the enlarged size, so it still shows the true length.
+
+**Check the value.** The metadata is only as good as the software that wrote it. Confirm the
+pixel size against your microscope's calibration, for example by imaging a stage micrometer,
+before using the scale bars in a paper.
+
 ## Reopening a folder
 
 If the input folder already contains a `spore_output` folder from an earlier session, the
@@ -143,9 +178,9 @@ Everything is written to a `spore_output` folder inside the input folder:
 ```
 spore_output/
 ├── spores.csv                 # one row per kept spore: ID, clicked x/y, crop size
-├── session.json               # image fingerprints and rejected candidates, for reopening
-├── S001.gif                   # animated GIF, one frame per timepoint, labelled
-├── S001_grid.jpg              # labelled grid for figures, 300 dpi tag
+├── session.json               # image fingerprints, rejected candidates and scale, for reopening
+├── S001.gif                   # animated GIF, one frame per timepoint, labelled, with scale bar
+├── S001_grid.jpg              # labelled grid for figures, with scale bars, 300 dpi tag
 ├── crops/
 │   └── S001/
 │       ├── t01.tif            # one TIFF crop per timepoint, pixel values unchanged
@@ -224,7 +259,7 @@ Coordinates are in pixels of the reference image, with (0, 0) at the top-left.
 
 ## Settings
 
-Change these constants at the top of the script:
+Change these in `spore_series/config.py`:
 
 | Constant | Default | Meaning |
 |---|---|---|
@@ -248,6 +283,13 @@ Change these constants at the top of the script:
 | `GRID_LABEL_FONT_PX` | 26 | Label font size in the grid JPG |
 | `GRID_JPEG_QUALITY` | 95 | JPEG quality |
 | `GRID_DPI` | 300 | Resolution tag written into the grid JPG |
+| `SCALE_BAR_CANDIDATES_UM` | 0.5 … 5000 | Round bar lengths a scale bar may use, in µm |
+| `SCALE_BAR_MAX_FRACTION` | 0.25 | Longest scale bar, as a fraction of the image width |
+| `SCALE_BAR_FONT_PX_GIF` | 12 | Font size of the scale bar label in the GIF |
+| `SCALE_BAR_FONT_PX_GRID` | 20 | Font size of the scale bar label in the grid |
+| `SCALE_MIN_UM_PER_PX` | 0.01 | Smallest pixel size accepted, in µm |
+| `SCALE_MAX_UM_PER_PX` | 1000.0 | Largest pixel size accepted, in µm |
+| `DEFAULT_DPI_VALUES` | 72, 96 | Resolutions treated as software defaults and ignored |
 
 ## Troubleshooting
 
@@ -266,6 +308,10 @@ Change these constants at the top of the script:
 - **Spore drifts or jumps in the GIF.** See *Known limitations*. Check the GIF and grid by
   eye.
 - **Crop size error.** Enter a whole number of at least 16.
+- **"No scale in the file metadata."** The message gives the reason the metadata was not
+  used. Type the microns per pixel in the box instead.
+- **Scale bar length looks wrong.** The value in the box is the one used. Check it against
+  the calibration (see *Scale bars*), correct it, and save again.
 - **Save failed.** The usual cause is a read-only or full drive, or a file that is open in
   another program (for example a CSV open in Excel). Close it and save again.
 
@@ -285,7 +331,10 @@ Change these constants at the top of the script:
   selection. New spore IDs continue after the highest number already in the output folder,
   so earlier spores are not replaced. Files from earlier runs are never removed
   automatically, and the preview window lists them.
+- **Scale bars need a correct pixel size.** A wrong value in the metadata gives wrong bars,
+  and the program cannot check it. Scale bars appear only in the saved GIFs and grids, not
+  in the main window.
 - **Deletion is permanent.** There is no undo for GIF and grid deletion.
-- **Figures.** The labels are part of the pixels in the GIF and grid. Check your journal's
+- **Figures.** The labels and scale bars are part of the pixels in the GIF and grid. Check your journal's
   figure requirements, since many ask for TIFF or EPS rather than JPEG. The grid is saved as
   JPEG for convenience. The TIFF crops are unlabelled originals.

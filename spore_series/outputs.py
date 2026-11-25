@@ -12,6 +12,8 @@ import cv2
 import numpy as np
 
 from .config import (
+    SCALE_BAR_FONT_PX_GIF,
+    SCALE_BAR_FONT_PX_GRID,
     FONT_CANDIDATES,
     GIF_FRAME_MS,
     GIF_LABEL_BAR_PX,
@@ -25,6 +27,7 @@ from .config import (
     PREVIEW_SIZE,
 )
 from .files import read_spores_csv
+from .scalebar import draw_scale_bar
 from .imaging import frames_to_pil
 from .models import FrameRegistration, Spore
 from .tracking import extract_crop
@@ -70,14 +73,25 @@ def make_contact_sheet(crops: list[np.ndarray], labels: list[str]) -> Image.Imag
     return sheet
 
 
-def save_gif(crops: list[np.ndarray], labels: list[str], output_path: Path) -> None:
-    """Animated GIF with each timepoint's label in a bar across the top of the frame."""
+def save_gif(
+    crops: list[np.ndarray],
+    labels: list[str],
+    output_path: Path,
+    um_per_px: float | None = None,
+) -> None:
+    """Animated GIF with each timepoint's label in a bar across the top of the frame.
+
+    If um_per_px is given, a scale bar is drawn in the bottom-right corner of each frame.
+    """
     font = load_label_font(16)
+    bar_font = load_label_font(SCALE_BAR_FONT_PX_GIF)
     frames = []
     for frame, label in zip(frames_to_pil(crops), labels):
         draw = ImageDraw.Draw(frame)
         draw.rectangle((0, 0, frame.width, GIF_LABEL_BAR_PX), fill="black")
         draw.text((6, 4), label, fill="white", font=font)
+        if um_per_px is not None:
+            draw_scale_bar(frame, um_per_px, 1.0, bar_font)
         frames.append(frame)
     frames[0].save(
         output_path,
@@ -120,11 +134,13 @@ def save_publication_grid(
     labels: list[str],
     output_path: Path,
     columns: int | None = None,
+    um_per_px: float | None = None,
 ) -> None:
     """Labelled grid JPG for article figures.
 
     Each panel has a thin black frame and its timepoint label below it, on white.
     Works for any number of timepoints; see grid_layout() for how rows and columns are chosen.
+    If um_per_px is given, each panel gets a scale bar matched to its magnification.
     """
     frames = frames_to_pil(crops)
     count = len(frames)
@@ -135,12 +151,16 @@ def save_publication_grid(
     sheet = Image.new("RGB", (columns * cell_w, rows * cell_h), "white")
     draw = ImageDraw.Draw(sheet)
     font = load_label_font(GRID_LABEL_FONT_PX)
+    bar_font = load_label_font(SCALE_BAR_FONT_PX_GRID)
 
     for i, (frame, label) in enumerate(zip(frames, labels)):
         cell_x, cell_y = grid_cell_origin(i, count, columns)
         x0 = cell_x + GRID_PANEL_PAD_PX
         y0 = cell_y + GRID_PANEL_PAD_PX
         panel = frame.resize((GRID_PANEL_PX, GRID_PANEL_PX), Image.Resampling.LANCZOS)
+        if um_per_px is not None:
+            # The panel is enlarged from the crop, so one source pixel covers this many panel pixels.
+            draw_scale_bar(panel, um_per_px, GRID_PANEL_PX / frame.width, bar_font)
         sheet.paste(panel, (x0, y0))
         draw.rectangle(
             (x0 - 1, y0 - 1, x0 + GRID_PANEL_PX, y0 + GRID_PANEL_PX),
@@ -219,11 +239,13 @@ def save_spore_outputs(
     paths: list[Path],
     aligned: list[np.ndarray],
     spores: list[Spore],
+    um_per_px: float | None = None,
 ) -> None:
     """Write spores.csv and, for each spore: TIFF crops, a GIF, a grid JPG, and alignment CSV.
 
     Uses the centers stored when each spore was reviewed, so the saved files match exactly
-    what the user approved.
+    what the user approved. The GIF and grid get scale bars when um_per_px is given; the TIFF
+    crops are never changed.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     labels = [p.stem for p in paths]
@@ -250,8 +272,13 @@ def save_spore_outputs(
 
         for crop, label in zip(crops, labels):
             _write_image(spore_dir / f"{label}.tif", crop)
-        save_gif(crops, labels, output_dir / f"{spore.spore_id}.gif")
-        save_publication_grid(crops, labels, output_dir / f"{spore.spore_id}_grid.jpg")
+        save_gif(crops, labels, output_dir / f"{spore.spore_id}.gif", um_per_px)
+        save_publication_grid(
+            crops,
+            labels,
+            output_dir / f"{spore.spore_id}_grid.jpg",
+            um_per_px=um_per_px,
+        )
 
         with open(
             spore_dir / "crop_alignment.csv", "w", newline="", encoding="utf-8"

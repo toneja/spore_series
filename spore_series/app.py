@@ -13,6 +13,7 @@ from PIL import Image
 from PIL import ImageTk
 import numpy as np
 
+from .calibration import read_pixel_size
 from .config import (
     DEFAULT_CROP_SIZE,
     IMAGE_EXTENSIONS,
@@ -22,6 +23,8 @@ from .config import (
     OUTPUT_FOLDER_NAME,
     REFERENCE_MAX_FIT_SCALE,
     REJECTED_MARKER_COLOR,
+    SCALE_MAX_UM_PER_PX,
+    SCALE_MIN_UM_PER_PX,
 )
 from .files import delete_output_files, existing_spore_numbers, list_saved_outputs
 from .imaging import frames_to_pil, natural_key, prepare_series, read_image
@@ -33,9 +36,12 @@ from .outputs import (
 )
 from .preview import OutputPreviewWindow
 from .registration import register_images
-from .session import folder_fingerprint, restore_selection, save_session
+from .session import folder_fingerprint, load_session, restore_selection, save_session
 from .tracking import extract_crop, track_spore
 from .zoom import ZoomControls, ZoomView
+
+
+SCALE_SOURCE_TEXT = {"metadata": "from file metadata", "entered": "entered by you"}
 
 
 class SporeApp:
@@ -61,6 +67,10 @@ class SporeApp:
         self._busy_window: tk.Toplevel | None = None
 
         self.crop_size_var = tk.StringVar(value=str(DEFAULT_CROP_SIZE))
+        self.scale_var = tk.StringVar(value="")  # microns per pixel, as typed
+        self.scale_info_var = tk.StringVar(value="")  # where the scale came from
+        self.scale_um_per_px: float | None = None
+        self.scale_source: str | None = None  # "metadata", "entered", or None
         self.status = tk.StringVar(
             value="Load a folder containing one image per timepoint."
         )
@@ -89,6 +99,16 @@ class SporeApp:
         ).pack(side="left", padx=6)
         ttk.Label(bar, text="Crop size (px):").pack(side="left", padx=(18, 4))
         ttk.Entry(bar, textvariable=self.crop_size_var, width=7).pack(side="left")
+        ttk.Label(bar, text="Microns per pixel:").pack(side="left", padx=(18, 4))
+        scale_entry = ttk.Entry(bar, textvariable=self.scale_var, width=8)
+        scale_entry.pack(side="left")
+        scale_entry.bind("<Return>", self.apply_scale)
+        ttk.Button(bar, text="Set scale", command=self.apply_scale).pack(
+            side="left", padx=(6, 4)
+        )
+        ttk.Label(bar, textvariable=self.scale_info_var, foreground="#555").pack(
+            side="left"
+        )
         ttk.Label(self.root, textvariable=self.status, padding=(10, 2)).pack(fill="x")
 
     def _build_view(self):
@@ -153,12 +173,13 @@ class SporeApp:
             return
 
         self.paths, self.images = paths, images
+        scale_note = self._detect_scale(paths, Path(folder) / OUTPUT_FOLDER_NAME)
         self.aligned, self.registrations, self._fingerprint = [], [], []
         self.spores, self.rejected = [], []
         self.spore_list.delete(0, tk.END)
         self.output_dir = Path(folder) / OUTPUT_FOLDER_NAME
         self.status.set(
-            f"Loaded {len(paths)} images. Reference: {paths[0].name}. Registering..."
+            f"Loaded {len(paths)} images. Reference: {paths[0].name}. Registering... {scale_note}"
         )
 
         self._reference_pil = frames_to_pil([images[0]])[0]
@@ -206,10 +227,16 @@ class SporeApp:
                 + ("" if r.inliers is None else f" ({r.inliers}/{r.matches} inliers)")
                 for p, r in zip(paths[1:], registrations[1:])
             )
+            scale_hint = (
+                ""
+                if self.scale_um_per_px is not None
+                else " No scale is set: type microns per pixel above to add scale bars."
+            )
             self.status.set(
                 "Registration complete. Review alignment before selecting spores. "
                 + summary
                 + (f" {restore_message}" if restore_message else "")
+                + scale_hint
             )
             if then is not None:
                 then()
@@ -282,6 +309,73 @@ class SporeApp:
             self._busy_window.destroy()
             self._busy_window = None
         self.root.config(cursor="")
+
+    def _detect_scale(self, paths: list[Path], output_dir: Path) -> str:
+        """Set the scale from the first image's metadata, or from an earlier session where the
+        user typed a value. The user's typed value wins over the metadata. Returns a status note.
+        """
+        session = load_session(output_dir)
+        saved = session.get("scale") if session else None
+        if (
+            saved
+            and saved["um_per_px"]
+            and saved["source"] == SCALE_SOURCE_TEXT["entered"]
+        ):
+            self._set_scale(float(saved["um_per_px"]), "entered")
+            return f"Scale {float(saved['um_per_px']):.4g} µm/px restored from the earlier session."
+        um_per_px, description = read_pixel_size(paths[0])
+        if um_per_px is None:
+            self._set_scale(None, None)
+            return f"No scale in the file metadata ({description}). Type microns per pixel to add scale bars."
+        self._set_scale(um_per_px, "metadata")
+        others = []
+        for p in paths[1:]:
+            value, _ = read_pixel_size(p)
+            if value is not None and abs(value - um_per_px) > 0.01 * um_per_px:
+                others.append(p.name)
+        note = (
+            f" Some frames have a different calibration ({', '.join(others[:3])}); the first image's value is used."
+            if others
+            else ""
+        )
+        return f"Scale from file metadata: {um_per_px:.4g} µm/px ({description}).{note}"
+
+    def _set_scale(self, um_per_px: float | None, source: str | None) -> None:
+        self.scale_um_per_px = um_per_px
+        self.scale_source = source
+        self.scale_var.set("" if um_per_px is None else f"{um_per_px:.4g}")
+        self.scale_info_var.set(
+            {
+                "metadata": "(from file metadata)",
+                "entered": "(entered by you)",
+                None: "(not set)",
+            }[source]
+        )
+
+    def apply_scale(self, event=None) -> None:
+        """Use the value typed in the scale box. An empty box means no scale bars."""
+        text = self.scale_var.get().strip()
+        if not text:
+            self._set_scale(None, None)
+            self.status.set(
+                "Scale cleared. Save again to remove the scale bars from the GIFs and grids."
+            )
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            value = float("nan")
+        if not (SCALE_MIN_UM_PER_PX <= value <= SCALE_MAX_UM_PER_PX):
+            messagebox.showerror(
+                "Scale",
+                "Enter the size of one pixel in microns, for example 0.65. "
+                "Leave the box empty for no scale bar.",
+            )
+            return
+        self._set_scale(value, "entered")
+        self.status.set(
+            f"Scale set to {value:.4g} µm/px. Save again to redraw the scale bars."
+        )
 
     def _spore_line(self, spore: Spore) -> str:
         return f"{spore.spore_id}: x={spore.x}, y={spore.y}, size={spore.size}"
@@ -407,18 +501,31 @@ class SporeApp:
         paths, aligned, registrations = self.paths, self.aligned, self.registrations
         spores, rejected = list(self.spores), list(self.rejected)
         output_dir, fingerprint = self.output_dir, self._fingerprint
+        um_per_px, scale_source = self.scale_um_per_px, self.scale_source
+        scale = (
+            None
+            if um_per_px is None
+            else {
+                "um_per_px": um_per_px,
+                "source": SCALE_SOURCE_TEXT[scale_source],
+            }
+        )
 
         def work():
-            save_spore_outputs(output_dir, paths, aligned, spores)
+            save_spore_outputs(output_dir, paths, aligned, spores, um_per_px)
             write_registration_diagnostics(
                 output_dir / "registration", paths, aligned, registrations
             )
-            save_session(output_dir, fingerprint, rejected)
+            save_session(output_dir, fingerprint, rejected, scale)
 
         def done(_):
+            if um_per_px is None:
+                scale_note = "No scale is set, so the GIFs and grids have no scale bar."
+            else:
+                scale_note = f"Scale bars drawn at {um_per_px:.4g} µm/px ({SCALE_SOURCE_TEXT[scale_source]})."
             self.status.set(
                 f"Saved {len(spores)} spore sequences to {output_dir}. "
-                "Registration diagnostics are in registration/."
+                "Registration diagnostics are in registration/. " + scale_note
             )
             if self.preview_window is not None:
                 self.preview_window.refresh()

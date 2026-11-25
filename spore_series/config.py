@@ -72,3 +72,12 @@ GIF_NAME_PATTERN = re.compile(r"(S\d{3,})\.gif")
 GRID_NAME_PATTERN = re.compile(r"(S\d{3,})_grid\.jpg")
 
 SESSION_FILE_NAME = "session.json"
+
+# Scale bars (microns per pixel)
+SCALE_BAR_CANDIDATES_UM = (0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
+SCALE_BAR_MAX_FRACTION = 0.25  # the bar is at most this fraction of the image width
+SCALE_MIN_UM_PER_PX = 0.01  # calibrations outside this range are treated as errors
+SCALE_MAX_UM_PER_PX = 1000.0
+DEFAULT_DPI_VALUES = (72.0, 96.0)  # common software defaults, not real calibrations
+SCALE_BAR_FONT_PX_GIF = 12
+SCALE_BAR_FONT_PX_GRID = 20

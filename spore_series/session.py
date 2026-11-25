@@ -26,11 +26,17 @@ def folder_fingerprint(paths: list[Path]) -> list[dict]:
     return fingerprint
 
 
-def save_session(output_dir: Path, fingerprint: list[dict], rejected) -> None:
-    """Record the images the selection was made on, and the rejected candidates."""
+def save_session(
+    output_dir: Path, fingerprint: list[dict], rejected, scale=None
+) -> None:
+    """Record the images the selection was made on, the rejected candidates, and the scale.
+
+    scale is None or a dict {"um_per_px": float or None, "source": str}.
+    """
     data = {
         "images": fingerprint,
         "rejected": [[int(x), int(y), int(size)] for x, y, size in rejected],
+        "scale": scale,
     }
     with open(output_dir / SESSION_FILE_NAME, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -45,7 +51,10 @@ def load_session(output_dir: Path) -> dict | None:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         rejected = [(int(x), int(y), int(size)) for x, y, size in data["rejected"]]
-        return {"images": data["images"], "rejected": rejected}
+        scale = data.get("scale")
+        if scale is not None:
+            scale = {"um_per_px": scale["um_per_px"], "source": str(scale["source"])}
+        return {"images": data["images"], "rejected": rejected, "scale": scale}
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
