@@ -57,7 +57,9 @@ GRID_PANEL_PX = 400
 GRID_PANEL_PAD_PX = 14
 GRID_LABEL_HEIGHT_PX = 40
 GRID_LABEL_FONT_PX = 26
-GRID_JPEG_QUALITY = 95
+GRID_JPEG_QUALITY = 95  # only used when the grid format is JPG
+GRID_DEFAULT_FORMAT = "tiff"  # "tiff" (lossless), "png" (lossless) or "jpg" (lossy)
+GRID_EXTENSIONS = {"tiff": ".tif", "png": ".png", "jpg": ".jpg"}
 GRID_DPI = 300
 
 FONT_CANDIDATES = (
@@ -69,7 +71,7 @@ FONT_CANDIDATES = (
 IDENTITY_AFFINE = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
 GIF_NAME_PATTERN = re.compile(r"(S\d{3,})\.gif")
-GRID_NAME_PATTERN = re.compile(r"(S\d{3,})_grid\.jpg")
+GRID_NAME_PATTERN = re.compile(r"(S\d{3,})_grid\.(tif|png|jpg)")
 
 SESSION_FILE_NAME = "session.json"
 

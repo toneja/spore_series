@@ -16,6 +16,7 @@ import numpy as np
 from .calibration import read_pixel_size
 from .config import (
     DEFAULT_CROP_SIZE,
+    GRID_DEFAULT_FORMAT,
     IMAGE_EXTENSIONS,
     KEPT_MARKER_COLOR,
     MARKER_RADIUS_PX,
@@ -42,6 +43,11 @@ from .zoom import ZoomControls, ZoomView
 
 
 SCALE_SOURCE_TEXT = {"metadata": "from file metadata", "entered": "entered by you"}
+GRID_FORMAT_CHOICES = {
+    "TIFF (lossless)": "tiff",
+    "PNG (lossless)": "png",
+    "JPG (lossy)": "jpg",
+}
 
 
 class SporeApp:
@@ -67,6 +73,11 @@ class SporeApp:
         self._busy_window: tk.Toplevel | None = None
 
         self.crop_size_var = tk.StringVar(value=str(DEFAULT_CROP_SIZE))
+        self.grid_format_var = tk.StringVar(
+            value=next(
+                k for k, v in GRID_FORMAT_CHOICES.items() if v == GRID_DEFAULT_FORMAT
+            )
+        )
         self.scale_var = tk.StringVar(value="")  # microns per pixel, as typed
         self.scale_info_var = tk.StringVar(value="")  # where the scale came from
         self.scale_um_per_px: float | None = None
@@ -106,6 +117,14 @@ class SporeApp:
         ttk.Button(bar, text="Set scale", command=self.apply_scale).pack(
             side="left", padx=(6, 4)
         )
+        ttk.Label(bar, text="Grid format:").pack(side="left", padx=(18, 4))
+        ttk.Combobox(
+            bar,
+            textvariable=self.grid_format_var,
+            values=list(GRID_FORMAT_CHOICES),
+            state="readonly",
+            width=16,
+        ).pack(side="left")
         ttk.Label(bar, textvariable=self.scale_info_var, foreground="#555").pack(
             side="left"
         )
@@ -502,6 +521,7 @@ class SporeApp:
         spores, rejected = list(self.spores), list(self.rejected)
         output_dir, fingerprint = self.output_dir, self._fingerprint
         um_per_px, scale_source = self.scale_um_per_px, self.scale_source
+        grid_format = GRID_FORMAT_CHOICES[self.grid_format_var.get()]
         scale = (
             None
             if um_per_px is None
@@ -512,7 +532,9 @@ class SporeApp:
         )
 
         def work():
-            save_spore_outputs(output_dir, paths, aligned, spores, um_per_px)
+            save_spore_outputs(
+                output_dir, paths, aligned, spores, um_per_px, grid_format
+            )
             write_registration_diagnostics(
                 output_dir / "registration", paths, aligned, registrations
             )
@@ -525,6 +547,7 @@ class SporeApp:
                 scale_note = f"Scale bars drawn at {um_per_px:.4g} µm/px ({SCALE_SOURCE_TEXT[scale_source]})."
             self.status.set(
                 f"Saved {len(spores)} spore sequences to {output_dir}. "
+                f"Grids saved as {grid_format.upper()}. "
                 "Registration diagnostics are in registration/. " + scale_note
             )
             if self.preview_window is not None:

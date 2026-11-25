@@ -16,19 +16,23 @@ from .config import GIF_FRAME_MS, GIF_NAME_PATTERN, GRID_NAME_PATTERN
 def list_saved_outputs(output_dir: Path | None) -> dict[str, dict[str, Path]]:
     """Find saved GIFs and grid JPGs in the output folder.
 
-    Returns {spore_id: {"gif": path, "grid": path}}, with only the files that exist.
-    Read from disk, so it also finds outputs saved in an earlier session.
+    Returns {spore_id: {"gif": path, "grid": path, "grids": [paths]}}, with only the files
+    that exist. "grid" is the most recently saved grid, in any format; "grids" lists every grid
+    file for the spore. Read from disk, so it also finds outputs saved in an earlier session.
     """
     if output_dir is None or not output_dir.is_dir():
         return {}
-    found: dict[str, dict[str, Path]] = {}
+    found: dict[str, dict] = {}
     for path in output_dir.iterdir():
         gif = GIF_NAME_PATTERN.fullmatch(path.name)
         grid = GRID_NAME_PATTERN.fullmatch(path.name)
         if gif:
             found.setdefault(gif.group(1), {})["gif"] = path
         elif grid:
-            found.setdefault(grid.group(1), {})["grid"] = path
+            found.setdefault(grid.group(1), {}).setdefault("grids", []).append(path)
+    for files in found.values():
+        if "grids" in files:
+            files["grid"] = max(files["grids"], key=lambda p: p.stat().st_mtime)
     return dict(sorted(found.items()))
 
 
@@ -42,7 +46,8 @@ def delete_output_files(output_dir: Path | None, spore_ids=None) -> list[Path]:
     for spore_id, files in list_saved_outputs(output_dir).items():
         if spore_ids is not None and spore_id not in spore_ids:
             continue
-        for path in files.values():
+        paths = ([files["gif"]] if "gif" in files else []) + files.get("grids", [])
+        for path in paths:
             path.unlink()
             deleted.append(path)
     return deleted

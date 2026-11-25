@@ -2,7 +2,7 @@
 
 The `spore_series` package aligns a series of microscope images taken over time, lets you click
 individual spores on the first image, follows each kept spore through the whole series, and
-saves the results as TIFF crops, an animated GIF, and a labelled grid JPG for figures. The
+saves the results as TIFF crops, an animated GIF, and a labelled grid for figures. The
 window can also preview and delete the GIFs and grids it has saved.
 
 ## Requirements
@@ -29,7 +29,7 @@ The program is a package, so each part can be read and changed on its own:
 | `spore_series/imaging.py` | Reading images, fitting frames to the reference size, brightness |
 | `spore_series/registration.py` | Aligning frames to the reference (SIFT, translation, spores) |
 | `spore_series/tracking.py` | Following each spore through the frames |
-| `spore_series/outputs.py` | TIFF crops, GIF, grid JPG, CSV rows, registration diagnostics |
+| `spore_series/outputs.py` | TIFF crops, GIF, grid (TIFF, PNG or JPG), CSV rows, registration diagnostics |
 | `spore_series/session.py` | Recording and restoring an earlier selection (`session.json`) |
 | `spore_series/files.py` | Listing, reading and deleting files in `spore_output` |
 | `spore_series/zoom.py` | The zoomable image view and click mapping |
@@ -48,7 +48,7 @@ Put the images for one experiment in a single folder, with one image per timepoi
 - **Supported formats:** `.tif`, `.tiff`, `.png`, `.jpg`, `.jpeg`, `.bmp`. Only the first page
   of a multi-page TIFF is read.
 - **Number of timepoints:** any number of two or more. The montage adapts to the count (see
-  *Grid JPG layout*).
+  *Grid layout and format*).
 - **Order:** files are sorted by natural order of their names, so `t2` comes before `t10`.
   Name them so that they sort chronologically, for example `t01.tif`, `t02.tif`, and so on.
 - **Reference:** the first image in that order is the registration reference. All spores
@@ -85,7 +85,8 @@ Put the images for one experiment in a single folder, with one image per timepoi
 5. Repeat steps 2 to 4 for each spore.
 6. **Save selected spores + outputs.** Writes all files for every kept spore, along with
    the registration diagnostics and the session record. A "Please wait" window shows while
-   it works. Saving does not ask for confirmation.
+   it works. Saving does not ask for confirmation. The grid is saved in the format chosen in
+   **Grid format** (TIFF by default).
 7. **Preview outputs** (optional) and **Delete GIFs + grids** (optional). See below.
 
 ### Viewing and zooming
@@ -111,7 +112,7 @@ output folder. Choose a spore from the drop-down list.
 - **Animated GIF** tab: plays the saved GIF. **Pause** and **Play** control the animation.
   The frame counter shows which timepoint is on screen. The GIF uses the same zoom controls
   as the main window.
-- **Grid JPG** tab (shown first): shows the saved grid, with zoom.
+- **Grid** tab (shown first): shows the saved grid, with zoom.
 - **Delete this spore's GIF + grid** deletes that spore's GIF and grid after you confirm.
 - **Open output folder** opens the folder in your file browser.
 
@@ -180,14 +181,14 @@ spore_output/
 ├── spores.csv                 # one row per kept spore: ID, clicked x/y, crop size
 ├── session.json               # image fingerprints, rejected candidates and scale, for reopening
 ├── S001.gif                   # animated GIF, one frame per timepoint, labelled, with scale bar
-├── S001_grid.jpg              # labelled grid for figures, with scale bars, 300 dpi tag
+├── S001_grid.tif              # labelled grid for figures, with scale bars (TIFF, 300 dpi)
 ├── crops/
 │   └── S001/
-│       ├── t01.tif            # one TIFF crop per timepoint, pixel values unchanged
+│       ├── t01.tif            # one TIFF crop per timepoint, from the aligned frame
 │       ├── ...
 │       └── crop_alignment.csv # per-frame tracked centre and match score
 ├── S002.gif
-├── S002_grid.jpg
+├── S002_grid.tif
 ├── crops/S002/...
 └── registration/              # written on every save
     ├── t02_overlay.png        # 50/50 blend of each aligned frame over the reference
@@ -195,11 +196,23 @@ spore_output/
     └── transformations.csv    # per-frame method, match counts, and 2x3 affine matrix
 ```
 
-### Grid JPG layout
+### Grid layout and format
 
 The grid uses the smallest near-square arrangement that fits the timepoints, and each
 panel is 400 px square with a thin black border and its label below it in black on white.
-The JPG is saved at 300 dpi with JPEG quality 95.
+
+The grid is saved at 300 dpi in the format chosen in the **Grid format** box:
+
+- **TIFF (lossless), the default.** LZW-compressed, so the pixels are exactly as drawn. Most
+  journals accept TIFF for figures.
+- **PNG (lossless).** The same pixels as TIFF, in a format most image tools open. PNG stores
+  resolution as pixels per metre, so the 300 dpi tag reads back as 299.999 dpi, which is the
+  same figure.
+- **JPG (lossy).** Smallest file, with a small loss from compression. Use it only when a
+  journal or a file-size limit requires it.
+
+Each spore keeps one grid. Saving in a new format removes that spore's grid in the old
+format.
 
 | Timepoints | Layout (columns x rows) | Empty cells |
 |---|---|---|
@@ -215,7 +228,7 @@ looks intentional. To force a width, pass `columns=` to `save_publication_grid`.
 ### GIF
 
 Each frame is 700 ms, and the GIF loops. A black bar across the top of each frame carries
-the timepoint label.
+the timepoint label. The GIF has 256 colours, so it is for viewing rather than figures.
 
 ### CSV columns
 
@@ -279,10 +292,11 @@ Change these in `spore_series/config.py`:
 | `DRAG_THRESHOLD_PX` | 4 | Movement below this counts as a click, not a drag |
 | `PREVIEW_MAX_FIT_SCALE` | 3.0 | How much small previews may be enlarged to fit |
 | `GIF_FRAME_MS` | 700 | Time per GIF frame |
-| `GRID_PANEL_PX` | 400 | Panel size in the grid JPG |
-| `GRID_LABEL_FONT_PX` | 26 | Label font size in the grid JPG |
-| `GRID_JPEG_QUALITY` | 95 | JPEG quality |
-| `GRID_DPI` | 300 | Resolution tag written into the grid JPG |
+| `GRID_PANEL_PX` | 400 | Panel size in the grid |
+| `GRID_LABEL_FONT_PX` | 26 | Label font size in the grid |
+| `GRID_JPEG_QUALITY` | 95 | JPEG quality, used only for the JPG format |
+| `GRID_DPI` | 300 | Resolution written into the grid file |
+| `GRID_DEFAULT_FORMAT` | tiff | Grid format selected at startup: `tiff`, `png` or `jpg` |
 | `SCALE_BAR_CANDIDATES_UM` | 0.5 … 5000 | Round bar lengths a scale bar may use, in µm |
 | `SCALE_BAR_MAX_FRACTION` | 0.25 | Longest scale bar, as a fraction of the image width |
 | `SCALE_BAR_FONT_PX_GIF` | 12 | Font size of the scale bar label in the GIF |
@@ -328,13 +342,16 @@ Change these in `spore_series/config.py`:
 - **Frame edges.** Registration can leave a black margin where the warped image did not
   cover the reference. Crops near the edge include zeros for the same reason.
 - **Overwriting.** Saving rewrites the files of any spore whose ID is in the current
-  selection. New spore IDs continue after the highest number already in the output folder,
+  selection, and each spore keeps one grid. New spore IDs continue after the highest number
+  already in the output folder,
   so earlier spores are not replaced. Files from earlier runs are never removed
   automatically, and the preview window lists them.
 - **Scale bars need a correct pixel size.** A wrong value in the metadata gives wrong bars,
   and the program cannot check it. Scale bars appear only in the saved GIFs and grids, not
   in the main window.
 - **Deletion is permanent.** There is no undo for GIF and grid deletion.
-- **Figures.** The labels and scale bars are part of the pixels in the GIF and grid. Check your journal's
-  figure requirements, since many ask for TIFF or EPS rather than JPEG. The grid is saved as
-  JPEG for convenience. The TIFF crops are unlabelled originals.
+- **Figures.** The labels and scale bars are part of the pixels in the GIF and grid. The grid
+  is saved as TIFF by default. Check your journal's figure requirements, since some ask for
+  EPS or a particular resolution. The TIFF crops are unlabelled. The frames after the
+  reference are resampled once during alignment, so their edges are slightly softer than the
+  camera's pixels. The reference frame is unchanged.

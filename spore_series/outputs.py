@@ -17,7 +17,9 @@ from .config import (
     FONT_CANDIDATES,
     GIF_FRAME_MS,
     GIF_LABEL_BAR_PX,
+    GRID_DEFAULT_FORMAT,
     GRID_DPI,
+    GRID_EXTENSIONS,
     GRID_JPEG_QUALITY,
     GRID_LABEL_FONT_PX,
     GRID_LABEL_HEIGHT_PX,
@@ -135,8 +137,9 @@ def save_publication_grid(
     output_path: Path,
     columns: int | None = None,
     um_per_px: float | None = None,
+    grid_format: str = GRID_DEFAULT_FORMAT,
 ) -> None:
-    """Labelled grid JPG for article figures.
+    """Labelled grid figure for articles, saved as TIFF (default), PNG or JPG.
 
     Each panel has a thin black frame and its timepoint label below it, on white.
     Works for any number of timepoints; see grid_layout() for how rows and columns are chosen.
@@ -175,12 +178,20 @@ def save_publication_grid(
             font=font,
         )
 
-    sheet.save(
-        output_path,
-        format="JPEG",
-        quality=GRID_JPEG_QUALITY,
-        dpi=(GRID_DPI, GRID_DPI),
-    )
+    _save_figure(sheet, output_path, grid_format)
+
+
+def _save_figure(sheet: Image.Image, path: Path, fmt: str) -> None:
+    """Write a figure at GRID_DPI. TIFF (LZW) and PNG are lossless; JPG is lossy."""
+    dpi = (GRID_DPI, GRID_DPI)
+    if fmt == "tiff":
+        sheet.save(path, format="TIFF", compression="tiff_lzw", dpi=dpi)
+    elif fmt == "png":
+        sheet.save(path, format="PNG", dpi=dpi)
+    elif fmt == "jpg":
+        sheet.save(path, format="JPEG", quality=GRID_JPEG_QUALITY, dpi=dpi)
+    else:
+        raise ValueError(f"Unknown grid format: {fmt!r}")
 
 
 def _write_image(path: Path, image: np.ndarray) -> None:
@@ -240,12 +251,14 @@ def save_spore_outputs(
     aligned: list[np.ndarray],
     spores: list[Spore],
     um_per_px: float | None = None,
+    grid_format: str = GRID_DEFAULT_FORMAT,
 ) -> None:
-    """Write spores.csv and, for each spore: TIFF crops, a GIF, a grid JPG, and alignment CSV.
+    """Write spores.csv and, for each spore: TIFF crops, a GIF, a grid, and alignment CSV.
 
     Uses the centers stored when each spore was reviewed, so the saved files match exactly
     what the user approved. The GIF and grid get scale bars when um_per_px is given; the TIFF
-    crops are never changed.
+    crops are never changed. Each spore keeps one grid, in grid_format; a grid of that spore
+    saved earlier in another format is removed.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     labels = [p.stem for p in paths]
@@ -273,12 +286,14 @@ def save_spore_outputs(
         for crop, label in zip(crops, labels):
             _write_image(spore_dir / f"{label}.tif", crop)
         save_gif(crops, labels, output_dir / f"{spore.spore_id}.gif", um_per_px)
+        grid_path = output_dir / f"{spore.spore_id}_grid{GRID_EXTENSIONS[grid_format]}"
         save_publication_grid(
-            crops,
-            labels,
-            output_dir / f"{spore.spore_id}_grid.jpg",
-            um_per_px=um_per_px,
+            crops, labels, grid_path, um_per_px=um_per_px, grid_format=grid_format
         )
+        for extension in GRID_EXTENSIONS.values():
+            stale = output_dir / f"{spore.spore_id}_grid{extension}"
+            if stale != grid_path and stale.exists():
+                stale.unlink()
 
         with open(
             spore_dir / "crop_alignment.csv", "w", newline="", encoding="utf-8"
